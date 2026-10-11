@@ -118,7 +118,7 @@ summary_countries = filtered_rankings["country"].nunique() if not filtered_ranki
 highest_points = int(filtered_rankings["points"].max()) if not filtered_rankings.empty and filtered_rankings["points"].notna().any() else 0
 
 m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Matching competitors", f"{summary_competitors:,}", help="Updates with the ranking filters in the sidebar.")
+m1.metric("Matching competitors", f"{summary_competitors:,}", help="Updates with the ranking filters in the sidebar.")
 m2.metric("Countries represented", f"{summary_countries:,}")
 m3.metric("Highest points · selected snapshot", f"{highest_points:,}")
 m4.metric("Competitions", f"{len(competitions):,}")
