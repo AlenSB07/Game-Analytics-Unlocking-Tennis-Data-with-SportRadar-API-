@@ -1,518 +1,227 @@
-
 from __future__ import annotations
 
-import mysql.connector
+import sqlite3
+from pathlib import Path
+
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 
 
-st.set_page_config(
-    page_title="Tennis Rankings Explorer",
-    page_icon="🎾",
-    layout="wide",
-)
+st.set_page_config(page_title="Tennis Rankings Explorer", page_icon="🎾", layout="wide")
+DB_PATH = Path(__file__).resolve().with_name("tennis_data.sqlite")
 
 
-def fetch_frame(connection, query: str, params: tuple = ()) -> pd.DataFrame:
-    """Run a read-only query and return the results as a dataframe."""
-    cursor = connection.cursor()
-    try:
-        cursor.execute(query, params)
-        rows = cursor.fetchall()
-        columns = [description[0] for description in cursor.description]
-        return pd.DataFrame(rows, columns=columns)
-    finally:
-        cursor.close()
+@st.cache_data(ttl=300)
+def load_data(database_path: str) -> dict[str, pd.DataFrame]:
+    with sqlite3.connect(database_path) as conn:
+        rankings = pd.read_sql_query(
+            """
+            SELECT cr.rank, cr.movement, cr.points, cr.competitions_played,
+                   c.id AS competitor_id, c.name AS competitor, c.country,
+                   c.country_code, c.abbreviation, rs.league, rs.gender,
+                   rs.year, rs.week, rs.id AS snapshot_id,
+                   rs.generated_at, rs.type_id
+            FROM competitor_rankings AS cr
+            JOIN competitors AS c ON c.id = cr.competitor_id
+            JOIN ranking_snapshots AS rs ON rs.id = cr.snapshot_id
+            ORDER BY rs.year DESC, rs.week DESC, cr.rank, c.name
+            """, conn
+        )
+        competitions = pd.read_sql_query(
+            """
+            SELECT co.id, co.name AS competition, co.type, co.gender, co.level,
+                   co.parent_id, COALESCE(cat.name, 'Uncategorized') AS category
+            FROM competitions AS co
+            LEFT JOIN categories AS cat ON cat.id = co.category_id
+            ORDER BY category, competition
+            """, conn
+        )
+        venues = pd.read_sql_query(
+            """
+            SELECT v.id, v.name AS venue, v.city_name AS city,
+                   COALESCE(v.country_name, 'Unknown') AS country,
+                   v.country_code, v.timezone, v.capacity,
+                   COALESCE(cx.name, 'Unknown') AS complex
+            FROM venues AS v
+            LEFT JOIN complexes AS cx ON cx.id = v.complex_id
+            ORDER BY country, city, venue
+            """, conn
+        )
+        snapshots = pd.read_sql_query(
+            """
+            SELECT id, league, gender, year, week, generated_at
+            FROM ranking_snapshots
+            ORDER BY year DESC, week DESC, league
+            """, conn
+        )
+    return {"rankings": rankings, "competitions": competitions,
+            "venues": venues, "snapshots": snapshots}
 
 
 st.title("🎾 Tennis Rankings Explorer")
-st.caption(
-    "Explore Sportradar ATP/WTA doubles rankings, venues, and competitions "
-    "from your MySQL database."
-)
+st.caption("Explore Sportradar doubles rankings, competitions, venues, and tennis complexes.")
 
-with st.sidebar:
-    st.header("MySQL connection")
-
-    # Use Streamlit Cloud Secrets when configured.
-    # When running locally without secrets.toml, show the connection form.
-    try:
-        has_mysql_secrets = "mysql" in st.secrets
-    except FileNotFoundError:
-        has_mysql_secrets = False
-
-    if has_mysql_secrets:
-        secret_config = st.secrets["mysql"]
-        db_config = {
-            "host": secret_config["host"],
-            "port": int(secret_config.get("port", 3306)),
-            "user": secret_config["user"],
-            "password": secret_config["password"],
-            "database": secret_config.get("database", "tennis_analytics"),
-        }
-        connected = True
-        st.caption("Using the private database settings configured for this app.")
-    else:
-        with st.form("mysql_connection"):
-            host = st.text_input("Host", value="localhost")
-            port = st.number_input(
-                "Port",
-                min_value=1,
-                max_value=65535,
-                value=3306,
-            )
-            username = st.text_input("Username", value="root")
-            password = st.text_input("Password", type="password")
-            database = st.text_input("Database", value="tennis_analytics")
-            connect_clicked = st.form_submit_button("Connect", type="primary")
-
-        if connect_clicked:
-            try:
-                test_connection = mysql.connector.connect(
-                    host=host,
-                    port=int(port),
-                    user=username,
-                    password=password,
-                    database=database,
-                    connection_timeout=8,
-                )
-                test_connection.close()
-                st.session_state["mysql_connected"] = True
-                st.success("Connected to MySQL.")
-            except mysql.connector.Error as exc:
-                st.session_state["mysql_connected"] = False
-                st.error(f"Could not connect: {exc}")
-
-        db_config = {
-            "host": host,
-            "port": int(port),
-            "user": username,
-            "password": password,
-            "database": database,
-        }
-        connected = st.session_state.get("mysql_connected", False)
-        st.caption(
-            "For a deployed app, configure the database under Streamlit Secrets."
-        )
-
-if not connected:
-    st.info(
-        "Enter your MySQL connection details in the sidebar "
-        "and select **Connect**."
-    )
+if not DB_PATH.exists():
+    st.error("The project database file is missing. Make sure tennis_data.sqlite is in the same GitHub folder as app.py.")
     st.stop()
-
 
 try:
-    connection = mysql.connector.connect(
-        **db_config,
-        connection_timeout=8,
-    )
-
-    try:
-        counts = fetch_frame(
-            connection,
-            """
-            SELECT
-                (SELECT COUNT(*) FROM competitions) AS competition_count,
-                (SELECT COUNT(*) FROM venues) AS venue_count,
-                (SELECT COUNT(*) FROM competitors) AS competitor_count
-            """,
-        )
-
-        snapshots = fetch_frame(
-            connection,
-            """
-            SELECT snapshot_id, league, year, week, generated_at
-            FROM ranking_snapshots
-            ORDER BY year DESC, week DESC, league
-            """,
-        )
-
-        rankings = fetch_frame(
-            connection,
-            """
-            SELECT
-                cr.rank AS competitor_rank,
-                cr.movement,
-                cr.points,
-                cr.competitions_played,
-                c.competitor_id,
-                c.name AS competitor_name,
-                COALESCE(c.country, 'Unknown') AS country,
-                c.country_code,
-                c.abbreviation,
-                rs.snapshot_id,
-                rs.league,
-                rs.gender,
-                rs.year,
-                rs.week,
-                rs.generated_at
-            FROM competitor_rankings AS cr
-            JOIN competitors AS c
-                ON c.competitor_id = cr.competitor_id
-            JOIN ranking_snapshots AS rs
-                ON rs.snapshot_id = cr.snapshot_id
-            """,
-        )
-
-        competitions = fetch_frame(
-            connection,
-            """
-            SELECT
-                comp.competition_id,
-                comp.competition_name,
-                comp.type,
-                comp.gender,
-                comp.level,
-                comp.parent_id,
-                COALESCE(cat.category_name, 'Uncategorized') AS category_name
-            FROM competitions AS comp
-            LEFT JOIN categories AS cat
-                ON cat.category_id = comp.category_id
-            """,
-        )
-
-        venues = fetch_frame(
-            connection,
-            """
-            SELECT
-                v.venue_id,
-                v.venue_name,
-                v.city_name,
-                v.country_name,
-                v.country_code,
-                v.timezone,
-                v.capacity,
-                v.complex_id,
-                COALESCE(cx.complex_name, 'Unknown') AS complex_name
-            FROM venues AS v
-            LEFT JOIN complexes AS cx
-                ON cx.complex_id = v.complex_id
-            """,
-        )
-    finally:
-        connection.close()
-
-except mysql.connector.Error as exc:
-    st.error(f"Could not read the project tables from MySQL: {exc}")
-    st.info(
-        "Confirm that the categories, competitions, complexes, venues, "
-        "ranking_snapshots, competitors, and competitor_rankings tables exist."
-    )
+    data = load_data(str(DB_PATH))
+except Exception as exc:
+    st.error(f"Could not read the project database: {exc}")
     st.stop()
 
+rankings_all = data["rankings"]
+competitions = data["competitions"]
+venues = data["venues"]
+snapshots = data["snapshots"]
 
-numeric_columns = [
-    "competitor_rank",
-    "movement",
-    "points",
-    "competitions_played",
-    "year",
-    "week",
-]
-for column in numeric_columns:
-    if column in rankings.columns:
-        rankings[column] = pd.to_numeric(rankings[column], errors="coerce")
-
-
-st.sidebar.subheader("Filters")
-
-if not snapshots.empty:
-    years = sorted(
-        snapshots["year"].dropna().astype(int).unique().tolist(),
-        reverse=True,
+if snapshots.empty:
+    st.warning("No ranking snapshots were found in the database.")
+    selected_snapshot = None
+else:
+    snapshots = snapshots.copy()
+    snapshots["label"] = snapshots.apply(
+        lambda r: f"{r['league']} · {r['gender'] or 'unknown'} · {r['year'] or '?'} week {r['week'] or '?'}",
+        axis=1,
     )
-    selected_year = st.sidebar.selectbox("Year", years)
-
-    year_snapshots = snapshots[snapshots["year"] == selected_year]
-    weeks = sorted(
-        year_snapshots["week"].dropna().astype(int).unique().tolist(),
-        reverse=True,
+    labels = dict(zip(snapshots["id"], snapshots["label"]))
+    selected_snapshot = st.sidebar.selectbox(
+        "Ranking snapshot", list(labels), format_func=lambda value: labels[value]
     )
-    selected_week = st.sidebar.selectbox("Week", ["All"] + weeks)
 
-    period_snapshots = year_snapshots.copy()
-    if selected_week != "All":
-        period_snapshots = period_snapshots[
-            period_snapshots["week"] == selected_week
-        ]
+rankings = rankings_all[rankings_all["snapshot_id"] == selected_snapshot].copy() if selected_snapshot is not None else rankings_all.copy()
 
-    genders = sorted(period_snapshots["gender"].dropna().unique().tolist())
-    selected_gender = st.sidebar.selectbox("Gender", ["All"] + genders)
+st.sidebar.header("Ranking filters")
+if not rankings.empty:
+    countries = sorted(rankings["country"].fillna("Unknown").unique().tolist())
+    chosen_countries = st.sidebar.multiselect("Country", countries, placeholder="All countries")
+    max_rank = max(1, int(rankings["rank"].max()))
+    rank_range = st.sidebar.slider("Rank range", 1, max_rank, (1, min(100, max_rank)))
+    min_points = st.sidebar.number_input("Minimum points", min_value=0, value=0, step=100)
+    search_name = st.sidebar.text_input("Search competitor")
+else:
+    chosen_countries, rank_range, min_points, search_name = [], (1, 1), 0, ""
 
-    selected_ids = period_snapshots["snapshot_id"].astype(int).tolist()
-    filtered_rankings = rankings[
-        rankings["snapshot_id"].isin(selected_ids)
-    ].copy()
+filtered_rankings = rankings.copy()
+if not filtered_rankings.empty:
+    filtered_rankings = filtered_rankings[filtered_rankings["rank"].between(*rank_range)]
+    filtered_rankings = filtered_rankings[filtered_rankings["points"].fillna(0) >= min_points]
+    if chosen_countries:
+        filtered_rankings = filtered_rankings[filtered_rankings["country"].fillna("Unknown").isin(chosen_countries)]
+    if search_name:
+        filtered_rankings = filtered_rankings[filtered_rankings["competitor"].str.contains(search_name, case=False, na=False)]
 
-    if selected_gender != "All":
-        filtered_rankings = filtered_rankings[
-            filtered_rankings["gender"] == selected_gender
-        ]
+summary_competitors = rankings_all["competitor_id"].nunique() if not rankings_all.empty else 0
+summary_countries = rankings_all["country"].nunique() if not rankings_all.empty else 0
+highest_points = int(rankings["points"].max()) if not rankings.empty and rankings["points"].notna().any() else 0
 
-    if not filtered_rankings.empty:
-        max_rank = max(1, int(filtered_rankings["competitor_rank"].max()))
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Ranked competitors", f"{summary_competitors:,}")
+m2.metric("Countries represented", f"{summary_countries:,}")
+m3.metric("Highest points · selected snapshot", f"{highest_points:,}")
+m4.metric("Competitions", f"{len(competitions):,}")
 
-        rank_range = st.sidebar.slider(
-            "Rank Range",
-            min_value=1,
-            max_value=max_rank,
-            value=(1, min(100, max_rank)),
-        )
+summary_tabs = st.tabs(["Overview", "Competitors", "Competitions", "Venues & complexes"])
 
-        filtered_rankings = filtered_rankings[
-            filtered_rankings["competitor_rank"].between(*rank_range)
-        ].copy()
+with summary_tabs[0]:
+    st.subheader("Selected ranking snapshot")
+    if rankings.empty:
+        st.info("No rankings are available for this snapshot.")
     else:
-        st.sidebar.caption(
-            "No ranking rows match this year/week/gender selection."
+        top = rankings.sort_values(["rank", "points"], ascending=[True, False]).head(10)
+        left, right = st.columns(2)
+        country_counts = rankings.groupby("country", dropna=False).size().reset_index(name="competitors")
+        country_counts["country"] = country_counts["country"].fillna("Unknown")
+        left.plotly_chart(
+            px.bar(country_counts.sort_values("competitors", ascending=False).head(15),
+                   x="country", y="competitors", title="Ranked competitors by country"),
+            use_container_width=True,
         )
-
-    st.sidebar.subheader("Search Competitors")
-    competitor_search = st.sidebar.text_input("Competitor name")
-
-    if competitor_search:
-        filtered_rankings = filtered_rankings[
-            filtered_rankings["competitor_name"].str.contains(
-                competitor_search,
-                case=False,
-                na=False,
-            )
-        ]
-else:
-    filtered_rankings = rankings.copy()
-    st.sidebar.info(
-        "No ranking snapshots found. Load rankings into MySQL first."
-    )
-
-
-st.subheader("Rankings")
-st.markdown("#### Filtered Rankings")
-
-if filtered_rankings.empty:
-    st.info("No rankings match the selected filters.")
-else:
-    ranking_columns = [
-        "league",
-        "year",
-        "week",
-        "gender",
-        "competitor_rank",
-        "points",
-        "competitor_name",
-        "country",
-    ]
-
-    ranking_display = (
-        filtered_rankings.sort_values(
-            ["league", "competitor_rank", "competitor_name"]
-        )[ranking_columns]
-        .rename(
-            columns={
-                "league": "League",
-                "year": "Year",
-                "week": "Week",
-                "gender": "Gender",
-                "competitor_rank": "Rank",
-                "points": "Points",
-                "competitor_name": "Competitor",
-                "country": "Country",
-            }
+        right.plotly_chart(
+            px.scatter(rankings, x="rank", y="points", color="league", hover_name="competitor",
+                       hover_data=["country", "movement"], title="Rank compared with points"),
+            use_container_width=True,
         )
-    )
+        st.markdown("**Top 10 competitors**")
+        st.dataframe(top[["rank", "movement", "points", "competitions_played", "competitor", "country"]],
+                     use_container_width=True, hide_index=True)
+    if not competitions.empty:
+        type_counts = competitions.groupby("type", dropna=False).size().reset_index(name="competitions")
+        type_counts["type"] = type_counts["type"].fillna("Unknown")
+        st.plotly_chart(px.bar(type_counts.sort_values("competitions", ascending=False),
+                               x="type", y="competitions", title="Competitions by event type"),
+                        use_container_width=True)
 
-    st.caption(f"{len(ranking_display):,} ranking rows match your filters")
-    st.dataframe(
-        ranking_display,
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    st.download_button(
-        "Download filtered rankings as CSV",
-        ranking_display.to_csv(index=False).encode("utf-8"),
-        file_name="tennis_rankings.csv",
-        mime="text/csv",
-    )
-
-    detail_options = filtered_rankings.drop_duplicates("competitor_id")
-
-    selected_competitor_id = st.selectbox(
-        "Competitor details",
-        detail_options["competitor_id"].tolist(),
-        format_func=lambda competitor_id: detail_options.loc[
-            detail_options["competitor_id"] == competitor_id,
-            "competitor_name",
-        ].iloc[0],
-    )
-
-    selected_detail = filtered_rankings[
-        filtered_rankings["competitor_id"] == selected_competitor_id
-    ][
-        [
-            "competitor_name",
-            "country",
-            "league",
-            "competitor_rank",
-            "movement",
-            "points",
-            "competitions_played",
-            "year",
-            "week",
-        ]
-    ].rename(
-        columns={
-            "competitor_name": "Competitor",
-            "country": "Country",
-            "league": "League",
-            "competitor_rank": "Rank",
-            "movement": "Movement",
-            "points": "Points",
-            "competitions_played": "Competitions Played",
-            "year": "Year",
-            "week": "Week",
-        }
-    )
-
-    st.markdown("#### Competitor Details")
-    st.dataframe(
-        selected_detail,
-        use_container_width=True,
-        hide_index=True,
-    )
-
-
-st.subheader("Venues and Complexes")
-
-if venues.empty:
-    st.info("No venue rows found.")
-else:
-    venue_countries = sorted(
-        venues["country_name"].dropna().unique().tolist()
-    )
-    venue_country = st.selectbox(
-        "Venue country",
-        ["All"] + venue_countries,
-    )
-
-    venue_search = st.text_input(
-        "Search venue, city, or complex",
-        key="venue_search",
-    )
-
-    filtered_venues = venues.copy()
-
-    if venue_country != "All":
-        filtered_venues = filtered_venues[
-            filtered_venues["country_name"] == venue_country
-        ]
-
-    if venue_search:
-        search_columns = ["venue_name", "city_name", "complex_name"]
-        search_mask = (
-            filtered_venues[search_columns]
-            .fillna("")
-            .astype(str)
-            .apply(
-                lambda column: column.str.contains(
-                    venue_search,
-                    case=False,
-                    na=False,
-                )
-            )
-            .any(axis=1)
+with summary_tabs[1]:
+    st.subheader("Search and filter competitors")
+    if filtered_rankings.empty:
+        st.info("No competitors match the selected filters.")
+    else:
+        st.dataframe(
+            filtered_rankings[["rank", "movement", "points", "competitions_played", "competitor", "country", "league"]]
+            .sort_values(["rank", "competitor"]),
+            use_container_width=True, hide_index=True,
         )
-        filtered_venues = filtered_venues[search_mask]
+        country_analysis = rankings.groupby("country", dropna=False).agg(
+            competitors=("competitor_id", "nunique"), average_points=("points", "mean"), total_points=("points", "sum")
+        ).reset_index().rename(columns={"country": "Country"})
+        country_analysis["Country"] = country_analysis["Country"].fillna("Unknown")
+        country_analysis["average_points"] = country_analysis["average_points"].round(1)
+        st.subheader("Country-wise ranking analysis")
+        st.dataframe(country_analysis.sort_values("competitors", ascending=False), use_container_width=True, hide_index=True)
+        st.download_button("Download filtered rankings", filtered_rankings.to_csv(index=False),
+                           "tennis_rankings.csv", "text/csv")
 
-    st.caption(f"Showing {len(filtered_venues):,} of {len(venues):,} venues")
+with summary_tabs[2]:
+    st.subheader("Competition catalog")
+    if competitions.empty:
+        st.info("No competition data is available.")
+    else:
+        f1, f2, f3 = st.columns(3)
+        type_options = sorted(competitions["type"].dropna().unique().tolist())
+        level_options = sorted(competitions["level"].dropna().unique().tolist())
+        category_options = sorted(competitions["category"].dropna().unique().tolist())
+        selected_types = f1.multiselect("Event type", type_options)
+        selected_levels = f2.multiselect("Competition level", level_options)
+        selected_categories = f3.multiselect("Category", category_options)
+        comp_view = competitions.copy()
+        if selected_types:
+            comp_view = comp_view[comp_view["type"].isin(selected_types)]
+        if selected_levels:
+            comp_view = comp_view[comp_view["level"].isin(selected_levels)]
+        if selected_categories:
+            comp_view = comp_view[comp_view["category"].isin(selected_categories)]
+        st.dataframe(comp_view, use_container_width=True, hide_index=True)
+        type_category = competitions.assign(type=competitions["type"].fillna("Unknown")).groupby(
+            ["category", "type"], dropna=False
+        ).size().reset_index(name="count")
+        st.plotly_chart(px.bar(type_category, x="category", y="count", color="type",
+                               title="Event type distribution by category", barmode="stack"),
+                        use_container_width=True)
 
-    venue_columns = [
-        "venue_name",
-        "city_name",
-        "country_name",
-        "timezone",
-        "complex_name",
-    ]
+with summary_tabs[3]:
+    st.subheader("Venues and complexes")
+    if venues.empty:
+        st.info("No venue data is available.")
+    else:
+        v1, v2 = st.columns(2)
+        venue_countries = sorted(venues["country"].dropna().unique().tolist())
+        selected_venue_countries = v1.multiselect("Country", venue_countries)
+        venue_query = v2.text_input("Search venue, city, or complex")
+        venue_view = venues.copy()
+        if selected_venue_countries:
+            venue_view = venue_view[venue_view["country"].isin(selected_venue_countries)]
+        if venue_query:
+            mask = venue_view[["venue", "city", "complex"]].astype(str).apply(
+                lambda col: col.str.contains(venue_query, case=False, na=False)
+            ).any(axis=1)
+            venue_view = venue_view[mask]
+        st.dataframe(venue_view, use_container_width=True, hide_index=True)
+        complex_counts = venues.groupby("complex", dropna=False).size().reset_index(name="venues")
+        st.markdown("**Complexes with the most venues**")
+        st.dataframe(complex_counts.sort_values("venues", ascending=False).head(20),
+                     use_container_width=True, hide_index=True)
 
-    venue_display = (
-        filtered_venues.sort_values(
-            ["country_name", "city_name", "venue_name"]
-        )[venue_columns]
-        .rename(
-            columns={
-                "venue_name": "Venue",
-                "city_name": "City",
-                "country_name": "Country",
-                "timezone": "Timezone",
-                "complex_name": "Complex",
-            }
-        )
-    )
-
-    st.dataframe(
-        venue_display,
-        use_container_width=True,
-        hide_index=True,
-    )
-
-
-st.subheader("Competition Explorer")
-
-if competitions.empty:
-    st.info("No competition rows found.")
-else:
-    filter_cols = st.columns(3)
-
-    type_options = sorted(
-        competitions["type"].fillna("Unknown").unique().tolist()
-    )
-    level_options = sorted(
-        competitions["level"].fillna("Unknown").unique().tolist()
-    )
-    category_options = sorted(
-        competitions["category_name"].fillna("Uncategorized").unique().tolist()
-    )
-
-    selected_types = filter_cols[0].multiselect(
-        "Competition type",
-        type_options,
-    )
-    selected_levels = filter_cols[1].multiselect(
-        "Competition level",
-        level_options,
-    )
-    selected_categories = filter_cols[2].multiselect(
-        "Category",
-        category_options,
-    )
-
-    filtered_competitions = competitions.copy()
-
-    if selected_types:
-        filtered_competitions = filtered_competitions[
-            filtered_competitions["type"].isin(selected_types)
-        ]
-
-    if selected_levels:
-        filtered_competitions = filtered_competitions[
-            filtered_competitions["level"].isin(selected_levels)
-        ]
-
-    if selected_categories:
-        filtered_competitions = filtered_competitions[
-            filtered_competitions["category_name"].isin(selected_categories)
-        ]
-
-    st.caption(
-        f"Showing {len(filtered_competitions):,} of "
-        f"{len(competitions):,} competitions"
-    )
-
-    st.dataframe(
-        filtered_competitions.sort_values(
-            ["category_name", "competition_name"]
-        ),
-        use_container_width=True,
-        hide_index=True,
-    )
+st.caption("Data snapshot from Sportradar feeds. Queries run against the bundled SQLite database.")
