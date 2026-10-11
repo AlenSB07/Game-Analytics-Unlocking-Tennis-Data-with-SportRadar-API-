@@ -229,3 +229,4 @@ with summary_tabs[3]:
                      use_container_width=True, hide_index=True)
 
 st.caption("Data snapshot from Sportradar feeds. Queries run against the bundled SQLite database.")
+st.markdown("<div style='text-align:center; padding:1rem 0; color:#7b8190;'>Developed by <strong>Alen S B</strong></div>", unsafe_allow_html=True)
