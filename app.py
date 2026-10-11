@@ -113,12 +113,12 @@ if not filtered_rankings.empty:
     if search_name:
         filtered_rankings = filtered_rankings[filtered_rankings["competitor"].str.contains(search_name, case=False, na=False)]
 
-summary_competitors = rankings_all["competitor_id"].nunique() if not rankings_all.empty else 0
-summary_countries = rankings_all["country"].nunique() if not rankings_all.empty else 0
-highest_points = int(rankings["points"].max()) if not rankings.empty and rankings["points"].notna().any() else 0
+summary_competitors = filtered_rankings["competitor_id"].nunique() if not filtered_rankings.empty else 0
+summary_countries = filtered_rankings["country"].nunique() if not filtered_rankings.empty else 0
+highest_points = int(filtered_rankings["points"].max()) if not filtered_rankings.empty and filtered_rankings["points"].notna().any() else 0
 
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Ranked competitors", f"{summary_competitors:,}")
+    m1.metric("Matching competitors", f"{summary_competitors:,}", help="Updates with the ranking filters in the sidebar.")
 m2.metric("Countries represented", f"{summary_countries:,}")
 m3.metric("Highest points · selected snapshot", f"{highest_points:,}")
 m4.metric("Competitions", f"{len(competitions):,}")
@@ -127,12 +127,13 @@ summary_tabs = st.tabs(["Overview", "Competitors", "Competitions", "Venues & com
 
 with summary_tabs[0]:
     st.subheader("Selected ranking snapshot")
-    if rankings.empty:
-        st.info("No rankings are available for this snapshot.")
+    st.caption(f"Showing {len(filtered_rankings):,} of {len(rankings):,} competitors matching the sidebar filters.")
+    if filtered_rankings.empty:
+        st.info("No competitors match the selected ranking filters.")
     else:
-        top = rankings.sort_values(["rank", "points"], ascending=[True, False]).head(10)
+        top = filtered_rankings.sort_values(["rank", "points"], ascending=[True, False]).head(10)
         left, right = st.columns(2)
-        country_counts = rankings.groupby("country", dropna=False).size().reset_index(name="competitors")
+        country_counts = filtered_rankings.groupby("country", dropna=False).size().reset_index(name="competitors")
         country_counts["country"] = country_counts["country"].fillna("Unknown")
         left.plotly_chart(
             px.bar(country_counts.sort_values("competitors", ascending=False).head(15),
@@ -140,7 +141,7 @@ with summary_tabs[0]:
             use_container_width=True,
         )
         right.plotly_chart(
-            px.scatter(rankings, x="rank", y="points", color="league", hover_name="competitor",
+            px.scatter(filtered_rankings, x="rank", y="points", color="league", hover_name="competitor",
                        hover_data=["country", "movement"], title="Rank compared with points"),
             use_container_width=True,
         )
@@ -156,6 +157,7 @@ with summary_tabs[0]:
 
 with summary_tabs[1]:
     st.subheader("Search and filter competitors")
+    st.caption(f"Showing {len(filtered_rankings):,} of {len(rankings):,} competitors in the selected snapshot.")
     if filtered_rankings.empty:
         st.info("No competitors match the selected filters.")
     else:
@@ -164,7 +166,7 @@ with summary_tabs[1]:
             .sort_values(["rank", "competitor"]),
             use_container_width=True, hide_index=True,
         )
-        country_analysis = rankings.groupby("country", dropna=False).agg(
+        country_analysis = filtered_rankings.groupby("country", dropna=False).agg(
             competitors=("competitor_id", "nunique"), average_points=("points", "mean"), total_points=("points", "sum")
         ).reset_index().rename(columns={"country": "Country"})
         country_analysis["Country"] = country_analysis["Country"].fillna("Unknown")
@@ -193,8 +195,9 @@ with summary_tabs[2]:
             comp_view = comp_view[comp_view["level"].isin(selected_levels)]
         if selected_categories:
             comp_view = comp_view[comp_view["category"].isin(selected_categories)]
+        st.caption(f"Showing {len(comp_view):,} of {len(competitions):,} competitions. Use the filters above this table.")
         st.dataframe(comp_view, use_container_width=True, hide_index=True)
-        type_category = competitions.assign(type=competitions["type"].fillna("Unknown")).groupby(
+        type_category = comp_view.assign(type=comp_view["type"].fillna("Unknown")).groupby(
             ["category", "type"], dropna=False
         ).size().reset_index(name="count")
         st.plotly_chart(px.bar(type_category, x="category", y="count", color="type",
@@ -218,6 +221,7 @@ with summary_tabs[3]:
                 lambda col: col.str.contains(venue_query, case=False, na=False)
             ).any(axis=1)
             venue_view = venue_view[mask]
+        st.caption(f"Showing {len(venue_view):,} of {len(venues):,} venues. Use the venue filters above this table.")
         st.dataframe(venue_view, use_container_width=True, hide_index=True)
         complex_counts = venues.groupby("complex", dropna=False).size().reset_index(name="venues")
         st.markdown("**Complexes with the most venues**")
